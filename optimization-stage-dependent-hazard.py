@@ -162,6 +162,61 @@ def optimize_pgd_internal_knots(
     }
 
 
+def optimize_mirror_descent(
+    problem: UsefulWorkHazardProblem,
+    max_iters: int = 1000,
+    step_size: float = 1e-2,
+    num_steps: int = 256,
+) -> Dict[str, object]:
+    """
+    Mirror descent with negative-entropy mirror map (exponentiated gradient)
+    in the shifted simplex coordinates Delta_tilde_k = Delta_k - epsilon.
+
+    Update rule:
+        Delta_tilde^{n+1}_k = T_tilde * Delta_tilde^n_k * exp(-alpha * g_k)
+                               / sum_j Delta_tilde^n_j * exp(-alpha * g_j)
+
+    where g = grad_Delta f and T_tilde = T - K * epsilon.
+    By construction every iterate satisfies Delta_tilde >= 0 and sum = T_tilde.
+
+    Step-size note: grad_delta is dimensionless (seconds/seconds) with
+    sup-norm ~ O(K).  The EG theoretical optimum for K intervals and T
+    iterations is  alpha* = sqrt(ln K) / (G * sqrt(T)) ~ 0.01.
+    """
+    K = problem.num_intervals
+    T_tilde = problem.total_useful_work - K * problem.epsilon
+
+    # Initialize: uniform shifted intervals
+    delta_tilde = np.full(K, T_tilde / K, dtype=float)
+
+    history = []
+    for it in range(max_iters):
+        delta = delta_tilde + problem.epsilon
+        grad = problem.gradient_delta(delta, num_steps=num_steps)
+        obj  = problem.objective_from_delta(delta, num_steps=num_steps)
+
+        # Exponentiated gradient update (log-sum-exp for numerical stability)
+        log_weights = np.log(delta_tilde) - step_size * grad
+        log_weights -= log_weights.max()              # shift for stability
+        weights = np.exp(log_weights)
+        delta_tilde_new = T_tilde * weights / weights.sum()
+
+        update_norm = np.linalg.norm(delta_tilde_new - delta_tilde)
+        history.append({"iter": it, "objective": obj, "update_norm": update_norm})
+
+        delta_tilde = delta_tilde_new
+        if update_norm < 1e-6:
+            break
+
+    delta = delta_tilde + problem.epsilon
+    return {
+        "delta": delta,
+        "objective": problem.objective_from_delta(delta, num_steps=num_steps),
+        "history": history,
+    }
+
+
+
 K = 8
 T = 48.0 * SECONDS_PER_HOUR  # Total useful work (e.g., 48 hours)
 epsilon = 0.5 * SECONDS_PER_HOUR  # Minimum interval length (e.g., 30 minutes)
@@ -191,24 +246,31 @@ for name, lambda_fn in HAZARD_FUNCTIONS.items():
     )
 
     pgd = optimize_pgd_internal_knots(prob, max_iters=100, step_size=1e3, num_steps=256)
+    md  = optimize_mirror_descent(prob, max_iters=500, step_size=1e-2, num_steps=256)
 
     equal_delta = np.full(K, T / K)
     equal_obj   = prob.objective_from_delta(equal_delta, num_steps=256)
-    opt_obj     = pgd["objective"]
-    improvement = 100.0 * (equal_obj - opt_obj) / equal_obj
+    pgd_obj     = pgd["objective"]
+    md_obj      = md["objective"]
+    pgd_improvement = 100.0 * (equal_obj - pgd_obj) / equal_obj
+    md_improvement  = 100.0 * (equal_obj - md_obj)  / equal_obj
 
-    print(f"  Equal obj:   {equal_obj:.2f}")
-    print(f"  Opt obj:     {opt_obj:.2f}")
-    print(f"  Improvement: {improvement:.2f}%")
+    print(f"  Equal obj:        {equal_obj:.2f}")
+    print(f"  PGD obj:          {pgd_obj:.2f}  ({pgd_improvement:.2f}%)")
+    print(f"  Mirror descent:   {md_obj:.2f}  ({md_improvement:.2f}%)")
 
     results[name] = {
-        "lambda_fn":    lambda_fn,
-        "equal_delta":  equal_delta,
-        "opt_delta":    pgd["delta"],
-        "equal_obj":    equal_obj,
-        "opt_obj":      opt_obj,
-        "improvement":  improvement,
-        "history":      pgd["history"],
+        "lambda_fn":        lambda_fn,
+        "equal_delta":      equal_delta,
+        "opt_delta":        pgd["delta"],
+        "md_delta":         md["delta"],
+        "equal_obj":        equal_obj,
+        "opt_obj":          pgd_obj,
+        "md_obj":           md_obj,
+        "improvement":      pgd_improvement,
+        "md_improvement":   md_improvement,
+        "history":          pgd["history"],
+        "md_history":       md["history"],
     }
 
 # ── Monte Carlo simulations ────────────────────────────────────────────────
@@ -228,30 +290,40 @@ for name, res in results.items():
         q=q,
         num_trials=1000,
     )
+    sim_md = monte_carlo_schedule_useful_work_hazard(
+        delta=res["md_delta"],
+        lambda_fn=lambda_fn,
+        q=q,
+        num_trials=1000,
+    )
     results[name]["sim_equal_runtime"] = sim_equal["mean_runtime"]
     results[name]["sim_pgd_runtime"]   = sim_pgd["mean_runtime"]
+    results[name]["sim_md_runtime"]    = sim_md["mean_runtime"]
     print(f"\n{name}:")
     print(f"  Equal schedule sim: {sim_equal}")
     print(f"  PGD schedule sim:   {sim_pgd}")
+    print(f"  MD schedule sim:    {sim_md}")
 
 # ── Plot 1: 2×2 interval bars ─────────────────────────────────────────────
 idx = np.arange(K)
-bar_w = 0.35
+bar_w = 0.25
 colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 names = list(results.keys())
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-fig.suptitle("Optimized vs. equal schedules by hazard function", fontsize=13)
+fig.suptitle("Schedules by hazard function", fontsize=13)
 
 for i, (name, res) in enumerate(results.items()):
     ax = axes[i // 2][i % 2]
 
-    ax.bar(idx - bar_w / 2, res["equal_delta"] / SECONDS_PER_HOUR,
+    ax.bar(idx - bar_w, res["equal_delta"] / SECONDS_PER_HOUR,
            width=bar_w, label="Equal", color="steelblue", alpha=0.7)
-    ax.bar(idx + bar_w / 2, res["opt_delta"] / SECONDS_PER_HOUR,
-           width=bar_w, label="Optimized", color=colors[i], alpha=0.9)
+    ax.bar(idx,         res["opt_delta"]   / SECONDS_PER_HOUR,
+           width=bar_w, label=f"PGD ({res['improvement']:.1f}%)", color="tomato", alpha=0.9)
+    ax.bar(idx + bar_w, res["md_delta"]    / SECONDS_PER_HOUR,
+           width=bar_w, label=f"MD ({res['md_improvement']:.1f}%)", color="seagreen", alpha=0.9)
 
-    ax.set_title(f"{name}  ({res['improvement']:.1f}% improvement)", fontsize=10)
+    ax.set_title(name, fontsize=10)
     ax.set_xlabel("Interval index")
     ax.set_ylabel("Useful work (h)")
     ax.set_xticks(idx)
@@ -263,20 +335,24 @@ plt.savefig("schedules_by_hazard.png", dpi=150, bbox_inches="tight")
 print("\nSaved schedules_by_hazard.png")
 
 # ── Plot 2: 1×2 summary — analytic objective + simulated mean runtime ──────
-fig2, (ax_obj, ax_sim) = plt.subplots(1, 2, figsize=(12, 4))
+fig2, (ax_obj, ax_sim) = plt.subplots(1, 2, figsize=(13, 4))
 names             = list(results.keys())
 equal_objs        = [results[n]["equal_obj"]         for n in names]
 opt_objs          = [results[n]["opt_obj"]           for n in names]
+md_objs           = [results[n]["md_obj"]            for n in names]
 sim_equal_runtime = [results[n]["sim_equal_runtime"] for n in names]
 sim_pgd_runtime   = [results[n]["sim_pgd_runtime"]   for n in names]
+sim_md_runtime    = [results[n]["sim_md_runtime"]    for n in names]
 x = np.arange(len(names))
+sw = 0.25  # summary bar width
 
 # Left: analytic objective
-ax_obj.bar(x - bar_w / 2, equal_objs, width=bar_w, label="Equal",     color="steelblue", alpha=0.7)
-ax_obj.bar(x + bar_w / 2, opt_objs,   width=bar_w, label="Optimized", color="tomato",    alpha=0.9)
+ax_obj.bar(x - sw, equal_objs, width=sw, label="Equal",  color="steelblue", alpha=0.7)
+ax_obj.bar(x,      opt_objs,   width=sw, label="PGD",    color="tomato",    alpha=0.9)
+ax_obj.bar(x + sw, md_objs,    width=sw, label="MD",     color="seagreen",  alpha=0.9)
 for i, n in enumerate(names):
-    ax_obj.text(i, max(equal_objs[i], opt_objs[i]) * 1.01,
-                f"{results[n]['improvement']:.1f}%", ha="center", fontsize=9)
+    ax_obj.text(i,      opt_objs[i] * 1.01, f"{results[n]['improvement']:.1f}%",   ha="center", fontsize=8, color="tomato")
+    ax_obj.text(i + sw, md_objs[i]  * 1.01, f"{results[n]['md_improvement']:.1f}%", ha="center", fontsize=8, color="seagreen")
 ax_obj.set_xticks(x)
 ax_obj.set_xticklabels(names)
 ax_obj.set_ylabel("Analytic objective (s)")
@@ -284,12 +360,15 @@ ax_obj.set_title("Analytic objective")
 ax_obj.legend()
 
 # Right: simulated mean runtime
-sim_improvement = [100.0 * (e - p) / e for e, p in zip(sim_equal_runtime, sim_pgd_runtime)]
-ax_sim.bar(x - bar_w / 2, sim_equal_runtime, width=bar_w, label="Equal",     color="steelblue", alpha=0.7)
-ax_sim.bar(x + bar_w / 2, sim_pgd_runtime,   width=bar_w, label="Optimized", color="tomato",    alpha=0.9)
+sim_pgd_impr = [100.0 * (e - p) / e for e, p in zip(sim_equal_runtime, sim_pgd_runtime)]
+sim_md_impr  = [100.0 * (e - p) / e for e, p in zip(sim_equal_runtime, sim_md_runtime)]
+ax_sim.bar(x - sw, sim_equal_runtime, width=sw, label="Equal", color="steelblue", alpha=0.7)
+ax_sim.bar(x,      sim_pgd_runtime,   width=sw, label="PGD",   color="tomato",    alpha=0.9)
+ax_sim.bar(x + sw, sim_md_runtime,    width=sw, label="MD",    color="seagreen",  alpha=0.9)
 for i in range(len(names)):
-    ax_sim.text(i, max(sim_equal_runtime[i], sim_pgd_runtime[i]) * 1.01,
-                f"{sim_improvement[i]:.1f}%", ha="center", fontsize=9)
+    top = max(sim_equal_runtime[i], sim_pgd_runtime[i], sim_md_runtime[i]) * 1.01
+    ax_sim.text(i,      top, f"{sim_pgd_impr[i]:.1f}%", ha="center", fontsize=8, color="tomato")
+    ax_sim.text(i + sw, top, f"{sim_md_impr[i]:.1f}%",  ha="center", fontsize=8, color="seagreen")
 ax_sim.set_xticks(x)
 ax_sim.set_xticklabels(names)
 ax_sim.set_ylabel("Mean runtime (s)")

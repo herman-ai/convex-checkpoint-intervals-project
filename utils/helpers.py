@@ -190,7 +190,6 @@ class UsefulWorkHazardProblem:
         gT = self.gradient_internal_knots(T_internal, num_steps=num_steps)
 
         gDelta = np.zeros(self.num_intervals, dtype=float)
-        # By the partner's formula
         gDelta[-1] = 0.0
         for j in range(self.num_intervals - 2, -1, -1):
             if j == self.num_intervals - 2:
