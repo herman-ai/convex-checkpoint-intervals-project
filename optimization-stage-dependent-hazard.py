@@ -323,8 +323,8 @@ for i, (name, res) in enumerate(results.items()):
     ax.legend(fontsize=8)
 
 plt.tight_layout()
-plt.savefig("schedules_by_hazard.png", dpi=150, bbox_inches="tight")
-print("\nSaved schedules_by_hazard.png")
+plt.savefig("figures/schedules_by_hazard.png", dpi=150, bbox_inches="tight")
+print("\nSaved figures/schedules_by_hazard.png")
 
 # ── Plot 2: 1×2 summary — analytic objective + simulated mean runtime ──────
 fig2, (ax_obj, ax_sim) = plt.subplots(1, 2, figsize=(13, 4))
@@ -367,8 +367,8 @@ ax_sim.set_ylabel("Mean runtime (s)")
 ax_sim.set_title("Simulated mean runtime (1000 trials)")
 ax_sim.legend()
 plt.tight_layout()
-plt.savefig("objective_comparison.png", dpi=150, bbox_inches="tight")
-print("Saved objective_comparison.png")
+plt.savefig("figures/objective_comparison.png", dpi=150, bbox_inches="tight")
+print("Saved figures/objective_comparison.png")
 
 # ── Plot 3: objective vs. iteration for PGD and MD ────────────────────────
 fig3, axes3 = plt.subplots(2, 2, figsize=(12, 8), sharex=False)
@@ -393,8 +393,8 @@ for i, (name, res) in enumerate(results.items()):
     ax.legend(fontsize=8)
 
 plt.tight_layout()
-plt.savefig("convergence.png", dpi=150, bbox_inches="tight")
-print("Saved convergence.png")
+plt.savefig("figures/convergence.png", dpi=150, bbox_inches="tight")
+print("Saved figures/convergence.png")
 
 plt.show()
 
