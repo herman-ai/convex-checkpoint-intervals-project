@@ -113,15 +113,14 @@ def project_internal_knots_pav(v: np.ndarray, total_useful_work: float, epsilon:
 
 def optimize_pgd_internal_knots(
     problem: UsefulWorkHazardProblem,
-    max_iters: int = 200,
-    step_size: float = 1e-2,
+    max_iters: int = 500,
+    step_size: float = 1e3,
     num_steps: int = 256,
 ) -> Dict[str, object]:
     """
-    PGD in the T-parameterization.
+    PGD in the T-parameterization with a fixed step size.
     """
     K = problem.num_intervals
-    # Initialize equal spacing
     delta0 = np.full(K, problem.total_useful_work / K)
     T_knots = problem.delta_to_knots(delta0)
     T_internal = T_knots[1:-1].copy()
@@ -138,14 +137,7 @@ def optimize_pgd_internal_knots(
 
         obj = problem.objective_from_internal_knots(T_internal_new, num_steps=num_steps)
         update_norm = np.linalg.norm(T_internal_new - T_internal)
-
-        history.append(
-            {
-                "iter": it,
-                "objective": obj,
-                "update_norm": update_norm,
-            }
-        )
+        history.append({"iter": it, "objective": obj, "update_norm": update_norm})
 
         T_internal = T_internal_new
         if update_norm < 1e-6:
@@ -245,7 +237,7 @@ for name, lambda_fn in HAZARD_FUNCTIONS.items():
         q=q,
     )
 
-    pgd = optimize_pgd_internal_knots(prob, max_iters=100, step_size=1e3, num_steps=256)
+    pgd = optimize_pgd_internal_knots(prob, max_iters=500, step_size=1e3, num_steps=256)
     md  = optimize_mirror_descent(prob, max_iters=500, step_size=1e-2, num_steps=256)
 
     equal_delta = np.full(K, T / K)
@@ -377,6 +369,32 @@ ax_sim.legend()
 plt.tight_layout()
 plt.savefig("objective_comparison.png", dpi=150, bbox_inches="tight")
 print("Saved objective_comparison.png")
+
+# ── Plot 3: objective vs. iteration for PGD and MD ────────────────────────
+fig3, axes3 = plt.subplots(2, 2, figsize=(12, 8), sharex=False)
+fig3.suptitle("Objective value vs. iteration", fontsize=13)
+
+for i, (name, res) in enumerate(results.items()):
+    ax = axes3[i // 2][i % 2]
+
+    pgd_iters = [h["iter"] for h in res["history"]]
+    pgd_objs  = [h["objective"] for h in res["history"]]
+    md_iters  = [h["iter"] for h in res["md_history"]]
+    md_objs   = [h["objective"] for h in res["md_history"]]
+
+    ax.plot(pgd_iters, pgd_objs,  color="tomato",   linewidth=1.5, label="PGD")
+    ax.plot(md_iters,  md_objs,   color="seagreen",  linewidth=1.5, label="MD (EG)")
+    ax.axhline(res["equal_obj"], color="steelblue", linewidth=1.0,
+               linestyle="--", label="Equal schedule")
+
+    ax.set_title(name, fontsize=10)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Objective (s)")
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.savefig("convergence.png", dpi=150, bbox_inches="tight")
+print("Saved convergence.png")
 
 plt.show()
 
