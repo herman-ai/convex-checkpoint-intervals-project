@@ -396,5 +396,24 @@ plt.tight_layout()
 plt.savefig("figures/convergence.png", dpi=150, bbox_inches="tight")
 print("Saved figures/convergence.png")
 
+# ── Plot 4: hazard functions ───────────────────────────────────────────────
+t_vals = np.linspace(0, T, 1000)
+hz_colors = {"Step": "steelblue", "Linear": "tomato", "Convex": "seagreen", "Three-phase": "darkorchid"}
+
+fig4, ax_hz = plt.subplots(figsize=(8, 4))
+for name, lambda_fn in HAZARD_FUNCTIONS.items():
+    lam_vals = np.array([lambda_fn(t) * SECONDS_PER_HOUR for t in t_vals])  # convert to 1/hour
+    ax_hz.plot(t_vals / SECONDS_PER_HOUR, lam_vals, label=name, color=hz_colors[name], linewidth=2)
+
+ax_hz.set_xlabel("Useful work completed (h)")
+ax_hz.set_ylabel("Hazard rate $\\lambda(t)$ (h$^{-1}$)")
+ax_hz.set_title("Hazard functions")
+ax_hz.legend()
+ax_hz.set_xlim(0, T / SECONDS_PER_HOUR)
+ax_hz.set_ylim(bottom=0)
+plt.tight_layout()
+plt.savefig("figures/hazard_functions.png", dpi=150, bbox_inches="tight")
+print("Saved figures/hazard_functions.png")
+
 plt.show()
 
