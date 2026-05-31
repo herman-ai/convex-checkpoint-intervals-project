@@ -116,14 +116,18 @@ def optimize_pgd_internal_knots(
     max_iters: int = 500,
     step_size: float = 1e3,
     num_steps: int = 256,
+    T_internal_init: "np.ndarray | None" = None,
 ) -> Dict[str, object]:
     """
     PGD in the T-parameterization with a fixed step size.
     """
     K = problem.num_intervals
-    delta0 = np.full(K, problem.total_useful_work / K)
-    T_knots = problem.delta_to_knots(delta0)
-    T_internal = T_knots[1:-1].copy()
+    if T_internal_init is not None:
+        T_internal = T_internal_init.copy()
+    else:
+        delta0 = np.full(K, problem.total_useful_work / K)
+        T_knots = problem.delta_to_knots(delta0)
+        T_internal = T_knots[1:-1].copy()
 
     history = []
     for it in range(max_iters):
@@ -159,6 +163,7 @@ def optimize_mirror_descent(
     max_iters: int = 1000,
     step_size: float = 1e-2,
     num_steps: int = 256,
+    delta_tilde_init: "np.ndarray | None" = None,
 ) -> Dict[str, object]:
     """
     Mirror descent with negative-entropy mirror map (exponentiated gradient)
@@ -178,8 +183,10 @@ def optimize_mirror_descent(
     K = problem.num_intervals
     T_tilde = problem.total_useful_work - K * problem.epsilon
 
-    # Initialize: uniform shifted intervals
-    delta_tilde = np.full(K, T_tilde / K, dtype=float)
+    if delta_tilde_init is not None:
+        delta_tilde = delta_tilde_init.copy()
+    else:
+        delta_tilde = np.full(K, T_tilde / K, dtype=float)
 
     history = []
     for it in range(max_iters):
@@ -213,10 +220,7 @@ K = 8
 T = 48.0 * SECONDS_PER_HOUR  # Total useful work (e.g., 48 hours)
 epsilon = 0.5 * SECONDS_PER_HOUR  # Minimum interval length (e.g., 30 minutes)
 
-q = np.array([
-    5 * 60, 5 * 60, 10 * 60, 10 * 60,
-    15 * 60, 15 * 60, 20 * 60, 20 * 60
-], dtype=float)
+q = np.full(K, 10 * 60, dtype=float)
 
 HAZARD_FUNCTIONS = {
     "Step":        lambda_fn_step,
