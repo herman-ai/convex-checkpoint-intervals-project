@@ -220,7 +220,7 @@ class RobustStepHazardProblem:
             lam_t = self.lambda_at(t, theta_star)
 
             grad[k - 1] = (
-                lam_t * (useful_terms[k - 1] + self.q[k - 1] * np.exp(L[k - 1]))
+                lam_t * np.exp(L[k - 1]) * (useful_terms[k - 1] + self.q[k - 1])
                 + 1.0
                 - (1.0 + self.q[k] * lam_t) * np.exp(L[k])
             )
@@ -310,8 +310,13 @@ class RobustPolynomialHazardProblem:
     def _make_lambda(self, theta: np.ndarray):
         T = self.T
         js = np.arange(len(theta), dtype=float)
-        def lambda_fn(t: float) -> float:
-            return float(np.dot(theta, (t / T) ** js))
+        def lambda_fn(t):
+            # Accepts both scalars and numpy arrays
+            t = np.asarray(t, dtype=float)
+            scalar = t.ndim == 0
+            t = np.atleast_1d(t)
+            result = (t[:, np.newaxis] / T) ** js @ theta   # shape (len(t),)
+            return float(result[0]) if scalar else result
         return lambda_fn
 
     @property
@@ -398,9 +403,13 @@ class RobustPowerLawHazardProblem:
     def _make_lambda(self, theta: np.ndarray):
         T = self.T
         theta0, theta1 = float(theta[0]), float(theta[1])
-        def lambda_fn(t: float) -> float:
-            t = max(t, 1e-12)  # avoid singularity for theta1 < 0 (integrable)
-            return theta0 * (t / T) ** theta1
+        def lambda_fn(t):
+            # Accepts both scalars and numpy arrays
+            t = np.asarray(t, dtype=float)
+            scalar = t.ndim == 0
+            t = np.atleast_1d(np.maximum(t, 1e-12))  # avoid singularity for theta1 < 0
+            result = theta0 * (t / T) ** theta1
+            return float(result[0]) if scalar else result
         return lambda_fn
 
     @property
@@ -509,6 +518,7 @@ def optimize_pgd_internal_knots(
     max_iters: int = 500,
     step_size: float = 1e3,
     num_steps: int = 256,
+    init_delta: np.ndarray | None = None,
 ) -> Dict[str, object]:
     """
     PGD in the T-parameterization with Armijo backtracking line search.
@@ -522,7 +532,10 @@ def optimize_pgd_internal_knots(
     rather than the unconstrained rule based on alpha * ||grad||^2.
     """
     K = problem.num_intervals
-    delta0 = np.full(K, problem.total_useful_work / K)
+    if init_delta is None:
+        delta0 = np.full(K, problem.total_useful_work / K)
+    else:
+        delta0 = np.asarray(init_delta, dtype=float).copy()
     T_knots = problem.delta_to_knots(delta0)
     T_internal = T_knots[1:-1].copy()
 
@@ -575,6 +588,7 @@ def optimize_mirror_descent(
     max_iters: int = 1000,
     step_size: float = 1e-2,
     num_steps: int = 256,
+    init_delta: np.ndarray | None = None,
 ) -> Dict[str, object]:
     """
     Mirror descent with negative-entropy mirror map (exponentiated gradient)
@@ -596,13 +610,17 @@ def optimize_mirror_descent(
     K = problem.num_intervals
     T_tilde = problem.total_useful_work - K * problem.epsilon
 
-    # Initialize: uniform shifted intervals
-    delta_tilde = np.full(K, T_tilde / K, dtype=float)
+    # Initialize from provided delta or default to equal spacing
+    if init_delta is None:
+        delta_tilde = np.full(K, T_tilde / K, dtype=float)
+    else:
+        d0 = np.asarray(init_delta, dtype=float)
+        delta_tilde = np.maximum(d0 - problem.epsilon, 1e-10)
+        delta_tilde *= T_tilde / delta_tilde.sum()
 
-    # Best-iterate tracking: for non-smooth objectives (e.g. step hazard) a
-    # fixed EG step oscillates around discontinuities.  We use a diminishing
-    # step  alpha_t = step_size / sqrt(t+1)  (standard subgradient schedule)
-    # and return the best delta seen across all iterates.
+    # Best-iterate tracking: return the best delta seen across all iterates.
+    # Combined with the diminishing step schedule this guarantees convergence
+    # even for non-smooth objectives (e.g. step hazard).
     # Seed with the initial (equal) schedule so we never return something worse
     # than the starting point (important when equal is near-optimal).
     delta_init_full  = delta_tilde + problem.epsilon
@@ -614,9 +632,11 @@ def optimize_mirror_descent(
         delta = delta_tilde + problem.epsilon
         grad = problem.gradient_delta(delta, num_steps=num_steps)
 
-        # Fixed step size (same as the non-robust reference file).  Best-iterate
-        # tracking below handles oscillation near non-smooth boundaries.
-        alpha = step_size
+        # Diminishing step schedule: alpha_t = step_size / sqrt(t+1).
+        # This is the standard subgradient schedule for non-smooth objectives
+        # (e.g. step hazard) where a fixed step would oscillate indefinitely
+        # around kinks. Best-iterate tracking ensures we keep the best seen so far.
+        alpha = step_size / np.sqrt(it + 1)
 
         # Exponentiated gradient update (log-sum-exp for numerical stability)
         log_weights = np.log(delta_tilde) - alpha * grad
@@ -647,6 +667,240 @@ def optimize_mirror_descent(
         "history": history,
     }
 
+
+
+def _diverse_inits(K: int, T: float, epsilon: float) -> list:
+    """
+    Three deterministic starting schedules for multi-start optimization:
+      - equal:        T/K per interval
+      - back-loaded:  linearly increasing intervals (weights 1, 2, ..., K)
+      - front-loaded: linearly decreasing intervals (weights K, K-1, ..., 1)
+
+    Back-loaded is a useful warm start when later intervals are safer (e.g.
+    step hazard with early rate >> late rate); front-loaded covers the
+    opposite case.  Equal is always included as the baseline.
+    """
+    T_tilde = T - K * epsilon
+    equal = np.full(K, T / K)
+    w_up = np.arange(1, K + 1, dtype=float)
+    back  = epsilon + T_tilde * w_up / w_up.sum()
+    w_dn  = np.arange(K, 0, -1, dtype=float)
+    front = epsilon + T_tilde * w_dn / w_dn.sum()
+    return [equal, back, front]
+
+
+def _best_pgd(problem, **kwargs) -> Dict[str, object]:
+    """PGD from three diverse initializations; returns the best result."""
+    inits = _diverse_inits(problem.num_intervals, problem.total_useful_work, problem.epsilon)
+    results = [optimize_pgd_internal_knots(problem, init_delta=d, **kwargs) for d in inits]
+    return min(results, key=lambda r: r["objective"])
+
+
+def _best_md(problem, **kwargs) -> Dict[str, object]:
+    """Mirror descent from three diverse initializations; returns the best result."""
+    inits = _diverse_inits(problem.num_intervals, problem.total_useful_work, problem.epsilon)
+    results = [optimize_mirror_descent(problem, init_delta=d, **kwargs) for d in inits]
+    return min(results, key=lambda r: r["objective"])
+
+
+# ── ADMM helpers ─────────────────────────────────────────────────────────────
+
+def _interval_h_grad_and_hess(problem, k: int, a: float, b: float, num_steps: int = 64) -> tuple:
+    """
+    Returns (dh/da, dh/db, d²h/da², d²h/db²) for interval k with endpoints a, b.
+
+    Exact analytic formulas (same for all three hazard types):
+        dh/da   = -exp(L) * (1 + q * lambda(a))
+        dh/db   =  lambda(b) * (ut + q * exp(L)) + 1
+        d²h/da² =  lambda(a) * exp(L) * (1 + q * lambda(a))
+        d²h/db² =  lambda(b)^2 * (ut + q * exp(L)) + lambda(b)
+
+    where  L = ∫_a^b lambda,  ut = exp(L) * ∫_a^b exp(-Λ(u)) du.
+    For RobustStepHazardProblem these are exact; for _worst_problem, L and ut
+    are obtained via numerical quadrature.
+    """
+    from utils.helpers import integrate_lambda, interval_work_integral
+    q_k = float(problem.q[k])
+
+    if isinstance(problem, RobustStepHazardProblem):
+        theta = problem.theta_worst
+        L = float(sum(
+            theta[j] * max(0.0, min(b, problem.tau[j + 1]) - max(a, problem.tau[j]))
+            for j in range(len(theta))
+        ))
+        exp_L = np.exp(L)
+        ut = problem.expected_useful_work_term(a, b, theta)
+        lam_a = problem.lambda_at(a, theta)
+        lam_b = problem.lambda_at(b, theta)
+    elif hasattr(problem, "_worst_problem"):
+        wp = problem._worst_problem
+        L = integrate_lambda(wp.lambda_fn, a, b, num_steps=num_steps)
+        exp_L = np.exp(L)
+        I = interval_work_integral(wp.lambda_fn, a, b, num_steps=num_steps)
+        ut = exp_L * I
+        lam_a = wp.lambda_fn(a)
+        lam_b = wp.lambda_fn(b)
+    else:
+        raise NotImplementedError(f"_interval_h_grad_and_hess: unsupported type {type(problem)}")
+
+    dh_da   = -exp_L * (1.0 + q_k * lam_a)
+    dh_db   = lam_b * (ut + q_k * exp_L) + 1.0
+    d2h_da2 = lam_a * exp_L * (1.0 + q_k * lam_a)
+    d2h_db2 = lam_b ** 2 * (ut + q_k * exp_L) + lam_b
+    return float(dh_da), float(dh_db), float(d2h_da2), float(d2h_db2)
+
+
+def optimize_admm(
+    problem,
+    max_iters: int = 300,
+    rho: float = 1.0,
+    inner_iters: int = 3,
+    num_steps: int = 64,
+    tol: float = 1e-6,
+    init_delta: np.ndarray | None = None,
+) -> Dict[str, object]:
+    """
+    ADMM for checkpoint scheduling with hazard rate uncertainty.
+
+    Variables:
+        x[k] = (x_k^-, x_k^+) ∈ R²  — local interval endpoints  (shape K×2)
+        z[m] ∈ R                      — global consensus checkpoints (shape K+1)
+    Constraint:  x_k^- = z[k], x_k^+ = z[k+1]  (i.e. x = Mz, M = [e_k, e_{k+1}]^T per row)
+
+    Augmented Lagrangian:
+        L_ρ(x,z,y) = Σ_k h(x_k; θ*) + y^T(x-Mz) + ρ/2 ‖x-Mz‖²
+
+    x-step: K independent 2-D subproblems solved via diagonal Newton steps:
+            Δa = -∇F/da / (d²h/da² + ρ),  Δb = -∇F/db / (d²h/db² + ρ).
+            This is the exact curvature-scaled GD step; inner_iters=2-3 suffices.
+    z-step: closed-form unconstrained minimiser then PAV projection onto T.
+            v[m] = (x[m-1,1] + x[m,0])/2 + (y[m-1,1] + y[m,0])/(2ρ)  for m=1..K-1
+    Dual:   y ← y + ρ(x - Mz).
+
+    Convergence note: ρ should be set to 1/(2 * pgd_step_size) via _auto_admm_rho
+    so that the ADMM z-updates have effective step size comparable to PGD.
+    """
+    K = problem.num_intervals
+    T = problem.total_useful_work
+    epsilon = problem.epsilon
+
+    # ── Initialise ────────────────────────────────────────────────────────────
+    if init_delta is None:
+        delta0 = np.full(K, T / K)
+    else:
+        delta0 = np.asarray(init_delta, dtype=float).copy()
+    z = problem.delta_to_knots(delta0).copy()      # shape (K+1,)
+    x = np.stack([z[:-1], z[1:]], axis=1).copy()  # shape (K, 2)
+    y = np.zeros((K, 2), dtype=float)             # dual variables, shape (K, 2)
+
+    history: List[Dict] = []
+
+    for it in range(max_iters):
+        Mz = np.stack([z[:-1], z[1:]], axis=1)   # current Mz target, shape (K, 2)
+
+        # ── x-step: K independent 2-D Newton subproblems ─────────────────────
+        # Newton step: Δ = -∇F / (∇²h + ρ)  — one step converges for near-quadratic h
+        for k in range(K):
+            v_a, v_b = Mz[k, 0], Mz[k, 1]
+            y_a, y_b = y[k, 0], y[k, 1]
+            a, b = x[k, 0], x[k, 1]
+            for _ in range(inner_iters):
+                b = max(b, a + 1e-6)   # keep interval positive-length
+                dh_da, dh_db, d2h_da2, d2h_db2 = _interval_h_grad_and_hess(
+                    problem, k, a, b, num_steps)
+                # Newton step with exact diagonal curvature: 1/(d²h + ρ)
+                H_a = d2h_da2 + rho
+                H_b = d2h_db2 + rho
+                a -= (dh_da + y_a + rho * (a - v_a)) / H_a
+                b -= (dh_db + y_b + rho * (b - v_b)) / H_b
+            x[k, 0] = a
+            x[k, 1] = max(b, a + 1e-6)
+
+        # ── z-step: unconstrained minimiser → PAV projection ─────────────────
+        # Interior z[m], m=1..K-1:  d/dz[m] L_ρ = 0  →  v[m-1] below
+        v_int = (x[:-1, 1] + x[1:, 0]) / 2.0 + (y[:-1, 1] + y[1:, 0]) / (2.0 * rho)
+        z[1:-1] = project_internal_knots_pav(v_int, T, epsilon)
+
+        # ── Dual update ───────────────────────────────────────────────────────
+        Mz_new = np.stack([z[:-1], z[1:]], axis=1)
+        residual = x - Mz_new
+        y += rho * residual
+
+        # ── Diagnostics ───────────────────────────────────────────────────────
+        primal_res = float(np.linalg.norm(residual))
+        delta = np.diff(z)
+        obj = problem.objective_from_delta(delta, num_steps=num_steps)
+        history.append({"iter": it, "objective": obj, "primal_res": primal_res})
+
+        if primal_res < tol:
+            break
+
+    delta = np.diff(z)
+    return {
+        "delta":     delta,
+        "z":         z,
+        "objective": problem.objective_from_delta(delta),
+        "history":   history,
+    }
+
+
+def _best_admm(problem, **kwargs) -> Dict[str, object]:
+    """ADMM from three diverse initializations; returns the best result."""
+    inits = _diverse_inits(problem.num_intervals, problem.total_useful_work, problem.epsilon)
+    results = [optimize_admm(problem, init_delta=d, **kwargs) for d in inits]
+    return min(results, key=lambda r: r["objective"])
+
+
+def _auto_pgd_step(prob, target_frac=0.05) -> float:
+    """
+    Set PGD step size so the first gradient step moves ~target_frac * (T - K*eps) / K.
+    Scale-independent: problems with larger gradients get smaller steps.
+    """
+    delta0     = np.full(prob.num_intervals, prob.total_useful_work / prob.num_intervals)
+    T_internal = prob.delta_to_knots(delta0)[1:-1]
+    grad       = prob.gradient_internal_knots(T_internal)
+    g_inf      = np.max(np.abs(grad))
+    if g_inf < 1e-15:
+        return 1e3
+    T_tilde = prob.total_useful_work - prob.num_intervals * prob.epsilon
+    target  = target_frac * T_tilde / prob.num_intervals
+    return target / g_inf
+
+
+def _auto_md_step(prob, target_logit=0.05, max_alpha=5.0) -> float:
+    """
+    Set the initial MD step size (alpha_0) so the first EG update shifts
+    log-weights by about `target_logit` nats for the highest-gradient component.
+
+    The EG update is: log(w_k^new) = log(w_k^old) - alpha * g_k + const,
+    so alpha * g_inf is the log-weight shift of the steepest component, i.e.
+    a multiplicative change of exp(-alpha * g_inf) in that component's weight.
+    target_logit=0.05 → ~5% fractional weight change per step, matching
+    _auto_pgd_step's target_frac=0.05 in Euclidean space.  Larger values
+    (e.g. 0.5) cause EG to overshoot near-optimal starting points because a
+    0.5-nat shift = exp(-0.5) ≈ 0.6× change in one step.
+    Capped at `max_alpha` to prevent huge steps when gradient is near-zero.
+    """
+    delta0 = np.full(prob.num_intervals, prob.total_useful_work / prob.num_intervals)
+    grad   = prob.gradient_delta(delta0)
+    g_inf  = np.max(np.abs(grad))
+    if g_inf < 1e-15:
+        return max_alpha
+    return min(target_logit / g_inf, max_alpha)
+
+
+def _auto_admm_rho(prob) -> float:
+    """
+    Set ADMM penalty ρ so that the effective ADMM z-update step size matches
+    the PGD step size:  ρ = 1 / (2 * pgd_step).
+
+    Analysis: with Newton x-step, each ADMM outer iteration moves z by
+    ≈ (df/dz) / (2*(d²h + ρ)).  Setting ρ << d²h gives step ≈ 1/(2*d²h)
+    (Newton scale); setting ρ >> d²h gives step ≈ 1/(2*ρ).  By choosing
+    ρ = 1/(2*pgd_step) we ensure the z-updates are on the same scale as PGD.
+    """
+    pgd_step = _auto_pgd_step(prob)
+    return 1.0 / (2.0 * pgd_step)
 
 
 def monte_carlo_uncertain_theta(
@@ -686,6 +940,8 @@ if __name__ == "__main__":
     import os
     os.makedirs("figures", exist_ok=True)
 
+    RUN_MC  = False   # set True to run Monte Carlo (slow)
+
     K       = 8
     T       = 48 * 3600.0
     epsilon = 0.5 * 3600.0
@@ -693,68 +949,36 @@ if __name__ == "__main__":
     equal_delta = np.full(K, T / K)
     N_MC = 100  # MC trials per (schedule, lambda) pair
 
-    def _auto_pgd_step(prob, target_frac=0.05):
-        """
-        Set PGD step size so the first gradient step moves ~target_frac * (T - K*eps) / K.
-        This makes the step scale-independent: a problem with 10x larger gradients
-        gets a 10x smaller step, so both converge in a similar number of iterations.
-        """
-        delta0     = np.full(prob.num_intervals, prob.total_useful_work / prob.num_intervals)
-        T_internal = prob.delta_to_knots(delta0)[1:-1]
-        grad       = prob.gradient_internal_knots(T_internal)
-        g_inf      = np.max(np.abs(grad))
-        if g_inf < 1e-15:
-            return 1e3
-        T_tilde    = prob.total_useful_work - prob.num_intervals * prob.epsilon
-        target     = target_frac * T_tilde / prob.num_intervals
-        return target / g_inf
-
-    def _auto_md_step(prob, target_logit=0.5, max_alpha=0.5):
-        """
-        Set the (fixed) MD step size so the first EG update shifts log-weights
-        by about `target_logit`.  Capped at `max_alpha` to prevent the step
-        from becoming huge when the gradient is near-zero (which happens for the
-        robust step hazard where equal spacing is already near-optimal).
-
-        With a fixed step and best-iterate tracking, this safely handles both
-        smooth hazards (polynomial, power-law) and non-smooth step hazards:
-        - Smooth: fixed step converges as in the non-robust reference file.
-        - Step robust (g_inf ≈ 2e-6): alpha is capped at 0.5, logit shift per
-          step ≈ 0.5 × 2e-6 ≈ 0; iterates barely move from equal, and the
-          initial equal schedule (seeded into best_obj) is returned — correct
-          because equal is near-optimal for that case.
-        """
-        delta0 = np.full(prob.num_intervals, prob.total_useful_work / prob.num_intervals)
-        grad = prob.gradient_delta(delta0)
-        g_inf = np.max(np.abs(grad))
-        if g_inf < 1e-15:
-            return max_alpha
-        return min(target_logit / g_inf, max_alpha)
-
     def run_comparison(label, nominal_prob, robust_prob, lambda_nom, lambda_wc):
-        """Run PGD and MD on both problems; print full table + MC; return results dict."""
+        """Run PGD, MD, and ADMM on both problems; print full table + MC; return results dict."""
         sep = "─" * 65
         print(f"\n{sep}\n  {label}\n{sep}")
 
-        nom_pgd = optimize_pgd_internal_knots(nominal_prob, max_iters=1000, step_size=_auto_pgd_step(nominal_prob))
-        nom_md  = optimize_mirror_descent(    nominal_prob, max_iters=2000, step_size=_auto_md_step(nominal_prob))
-        rob_pgd = optimize_pgd_internal_knots(robust_prob,  max_iters=1000, step_size=_auto_pgd_step(robust_prob))
-        rob_md  = optimize_mirror_descent(    robust_prob,  max_iters=2000, step_size=_auto_md_step(robust_prob))
+        nom_pgd  = _best_pgd( nominal_prob, max_iters=1000, step_size=_auto_pgd_step(nominal_prob))
+        nom_md   = _best_md(  nominal_prob, max_iters=2000, step_size=_auto_md_step(nominal_prob))
+        nom_admm = _best_admm(nominal_prob, max_iters=500,  rho=_auto_admm_rho(nominal_prob))
+        rob_pgd  = _best_pgd( robust_prob,  max_iters=1000, step_size=_auto_pgd_step(robust_prob))
+        rob_md   = _best_md(  robust_prob,  max_iters=2000, step_size=_auto_md_step(robust_prob))
+        rob_admm = _best_admm(robust_prob,  max_iters=500,  rho=_auto_admm_rho(robust_prob))
 
-        sched_keys = ["equal", "nom_pgd", "nom_md", "rob_pgd", "rob_md"]
+        sched_keys = ["equal", "nom_pgd", "nom_md", "nom_admm", "rob_pgd", "rob_md", "rob_admm"]
         sched_lbl  = {
-            "equal"  : "equal      ",
-            "nom_pgd": "nominal PGD",
-            "nom_md" : "nominal MD ",
-            "rob_pgd": "robust  PGD",
-            "rob_md" : "robust  MD ",
+            "equal"   : "equal       ",
+            "nom_pgd" : "nominal PGD ",
+            "nom_md"  : "nominal MD  ",
+            "nom_admm": "nominal ADMM",
+            "rob_pgd" : "robust  PGD ",
+            "rob_md"  : "robust  MD  ",
+            "rob_admm": "robust  ADMM",
         }
         deltas = {
-            "equal"  : equal_delta,
-            "nom_pgd": nom_pgd["delta"],
-            "nom_md" : nom_md["delta"],
-            "rob_pgd": rob_pgd["delta"],
-            "rob_md" : rob_md["delta"],
+            "equal"   : equal_delta,
+            "nom_pgd" : nom_pgd["delta"],
+            "nom_md"  : nom_md["delta"],
+            "nom_admm": nom_admm["delta"],
+            "rob_pgd" : rob_pgd["delta"],
+            "rob_md"  : rob_md["delta"],
+            "rob_admm": rob_admm["delta"],
         }
 
         print("\n  Schedules (h):")
@@ -762,40 +986,43 @@ if __name__ == "__main__":
             print(f"    {sched_lbl[k]}: {np.round(deltas[k] / 3600, 2)}")
 
         # ── Analytic objectives ──────────────────────────────────────────────
-        print(f"\n  {'':22s}  {'at theta_hat':>14s}  {'at theta*':>12s}")
+        print(f"\n  {'':24s}  {'at theta_hat':>14s}  {'at theta*':>12s}")
         analytic = {}
         for k in sched_keys:
             at_nom = nominal_prob.objective_from_delta(deltas[k])
             at_wc  = robust_prob.objective_from_delta(deltas[k])
             analytic[k] = (at_nom, at_wc)
-            print(f"  {sched_lbl[k]}             {at_nom:>14.1f}s  {at_wc:>12.1f}s")
+            print(f"  {sched_lbl[k]}           {at_nom:>14.1f}s  {at_wc:>12.1f}s")
 
-        for opt in ("pgd", "md"):
+        for opt in ("pgd", "md", "admm"):
             nom_nom, nom_wc = analytic[f"nom_{opt}"]
             rob_nom, rob_wc = analytic[f"rob_{opt}"]
             price  = rob_nom - nom_nom
             saving = nom_wc  - rob_wc
-            print(f"\n  [{opt.upper()}]  Price of robustness: +{price:.1f}s (+{100*price/nom_nom:.2f}%)"
+            print(f"\n  [{opt.upper():4s}]  Price of robustness: +{price:.1f}s (+{100*price/nom_nom:.2f}%)"
                   f"   Worst-case savings: -{saving:.1f}s (-{100*saving/nom_wc:.2f}%)")
 
         # ── Monte Carlo ──────────────────────────────────────────────────────
-        print(f"\n  Monte Carlo ({N_MC} trials, nominal lambda / worst-case lambda):")
         mc = {}
-        for k in sched_keys:
-            r_n = monte_carlo_schedule_useful_work_hazard(
-                delta=deltas[k], lambda_fn=lambda_nom, q=q, num_trials=N_MC)
-            r_w = monte_carlo_schedule_useful_work_hazard(
-                delta=deltas[k], lambda_fn=lambda_wc,  q=q, num_trials=N_MC)
-            mc[k] = (r_n, r_w)
-            print(f"    {sched_lbl[k]}:  nom {r_n['mean_runtime']:.0f}s (±{r_n['stderr_runtime']:.0f})"
-                  f"   wc {r_w['mean_runtime']:.0f}s (±{r_w['stderr_runtime']:.0f})")
+        if RUN_MC:
+            print(f"\n  Monte Carlo ({N_MC} trials, nominal lambda / worst-case lambda):")
+            for k in sched_keys:
+                r_n = monte_carlo_schedule_useful_work_hazard(
+                    delta=deltas[k], lambda_fn=lambda_nom, q=q, num_trials=N_MC)
+                r_w = monte_carlo_schedule_useful_work_hazard(
+                    delta=deltas[k], lambda_fn=lambda_wc,  q=q, num_trials=N_MC)
+                mc[k] = (r_n, r_w)
+                print(f"    {sched_lbl[k]}:  nom {r_n['mean_runtime']:.0f}s (\u00b1{r_n['stderr_runtime']:.0f})"
+                      f"   wc {r_w['mean_runtime']:.0f}s (\u00b1{r_w['stderr_runtime']:.0f})")
 
         return {
             "label":        label,
             "nom_pgd":      nom_pgd,
             "nom_md":       nom_md,
+            "nom_admm":     nom_admm,
             "rob_pgd":      rob_pgd,
             "rob_md":       rob_md,
+            "rob_admm":     rob_admm,
             "deltas":       deltas,
             "analytic":     analytic,
             "mc":           mc,
@@ -803,15 +1030,20 @@ if __name__ == "__main__":
             "robust_prob":  robust_prob,
         }
 
-    # ── 1. Step hazard ──────────────────────────────────────────────────────
-    # Early rate 4× late rate → nominal heavily back-loads (late is much safer).
-    # rho[1]=3.0 → worst-case late rate = 4× nominal = same as early rate.
-    # This reverses the preference: robust schedule ≈ equal; nominal loses badly at wc.
-    tau      = np.array([0, 24*3600, 48*3600], dtype=float)
-    th_step  = np.array([1/(6*3600), 1/(24*3600)], dtype=float)
-    rho_step = np.array([0.05, 3.0]) * th_step
+    # ── 1. Step hazard (3-phase, ordering reversal) ──────────────────────────
+    # At theta_hat phase ordering (safest→riskiest): 2 < 1 < 3
+    #   theta_hat = [0.10, 0.05, 0.20] /h  → nominal concentrates work in phase 2 (16–32h)
+    # At theta_worst phase ordering:          1 < 3 < 2  (complete reversal for phases 1&2)
+    #   theta_worst ≈ [0.105, 0.30, 0.21] /h → robust concentrates work in phase 1 (0–16h)
+    # Large uncertainty on phase 2 (rho = 500% of nominal) drives the reversal.
+    # Both nominal and robust schedules improve clearly over equal; their optimal
+    # strategies are visually distinct, illustrating the value of robust optimization.
+    tau      = np.array([0, 16*3600, 32*3600, 48*3600], dtype=float)
+    th_step  = np.array([1/(10*3600), 1/(20*3600), 1/(5*3600)], dtype=float)
+    rho_step = np.array([0.05, 5.0, 0.05]) * th_step
+    # theta_worst = [0.105, 0.30, 0.21] /h
     step_res = run_comparison(
-        "Step hazard  [early 4x late; rho = 5% early, 300% late]",
+        "Step hazard  [3-phase ordering reversal; phase 2 safe nominally but risky at theta*]",
         RobustStepHazardProblem(T, K, epsilon, tau, th_step, np.zeros_like(th_step), q),
         RobustStepHazardProblem(T, K, epsilon, tau, th_step, rho_step, q),
         lambda_nom=make_step_lambda_fn(tau, th_step),
@@ -850,28 +1082,33 @@ if __name__ == "__main__":
 
     all_results   = [step_res, poly_res, pl_res]
     short_labels  = ["Step", "Polynomial", "Power-law"]
-    sched_keys    = ["equal", "nom_pgd", "nom_md", "rob_pgd", "rob_md"]
-    sched_disp    = ["equal", "nom\nPGD", "nom\nMD", "rob\nPGD", "rob\nMD"]
-    bar_clrs5     = ["steelblue", "tomato", "#ff9999", "seagreen", "#90ee90"]
+    sched_keys    = ["equal", "nom_pgd", "nom_md", "nom_admm", "rob_pgd", "rob_md", "rob_admm"]
+    sched_disp    = ["equal", "nom\nPGD", "nom\nMD", "nom\nADMM", "rob\nPGD", "rob\nMD", "rob\nADMM"]
+    bar_clrs7     = ["steelblue", "tomato", "#ff9999", "darkorange",
+                     "seagreen",  "#90ee90", "#2e7d32"]
     k_idx         = np.arange(K)
-    bar_w         = 0.2
-    x5            = np.arange(5)
+    bar_w         = 0.18
+    x7            = np.arange(7)
 
     # ── Plot 1: Schedules 3×2 ──────────────────────────────────────────────
     fig1, axes1 = plt.subplots(3, 2, figsize=(14, 12))
-    fig1.suptitle("Robust vs nominal optimal schedules (PGD and MD)", fontsize=13)
+    fig1.suptitle("Robust vs nominal optimal schedules (PGD, MD, ADMM)", fontsize=13)
     for row, (res, slabel) in enumerate(zip(all_results, short_labels)):
-        for col, (title, d_keys, clrs) in enumerate([
+        for col, (title, d_keys, clrs, lbls) in enumerate([
             ("Nominal problem (theta = theta_hat)",
-             ["equal", "nom_pgd", "nom_md"],
-             ["steelblue", "tomato", "#ff9999"]),
+             ["equal", "nom_pgd", "nom_md", "nom_admm"],
+             ["steelblue", "tomato", "#ff9999", "darkorange"],
+             ["equal", "PGD", "MD", "ADMM"]),
             ("Robust problem (theta = theta*)",
-             ["equal", "rob_pgd", "rob_md"],
-             ["steelblue", "seagreen", "#90ee90"]),
+             ["equal", "rob_pgd", "rob_md", "rob_admm"],
+             ["steelblue", "seagreen", "#90ee90", "#2e7d32"],
+             ["equal", "PGD", "MD", "ADMM"]),
         ]):
             ax = axes1[row, col]
-            for i, (dk, color, lbl) in enumerate(zip(d_keys, clrs, ["equal", "PGD", "MD"])):
-                ax.bar(k_idx + (i - 1) * bar_w, res["deltas"][dk] / 3600,
+            n_bars = len(d_keys)
+            offsets = np.arange(n_bars) - (n_bars - 1) / 2.0
+            for i, (dk, color, lbl) in enumerate(zip(d_keys, clrs, lbls)):
+                ax.bar(k_idx + offsets[i] * bar_w, res["deltas"][dk] / 3600,
                        width=bar_w, label=lbl, color=color, alpha=0.85)
             ax.set_title(f"{slabel} — {title}", fontsize=9)
             ax.set_xlabel("Interval k"); ax.set_ylabel("delta_k (h)")
@@ -882,18 +1119,22 @@ if __name__ == "__main__":
 
     # ── Plot 2: Convergence 3×2 ────────────────────────────────────────────
     fig2, axes2 = plt.subplots(3, 2, figsize=(14, 12))
-    fig2.suptitle("Convergence: objective vs iteration (PGD and MD)", fontsize=13)
+    fig2.suptitle("Convergence: objective vs iteration (PGD, MD, ADMM)", fontsize=13)
     for row, (res, slabel) in enumerate(zip(all_results, short_labels)):
-        for col, (pgd_k, md_k, prob_k, title) in enumerate([
-            ("nom_pgd", "nom_md", "nominal_prob", "Nominal problem"),
-            ("rob_pgd", "rob_md", "robust_prob",  "Robust problem"),
+        for col, (pgd_k, md_k, admm_k, prob_k, title) in enumerate([
+            ("nom_pgd", "nom_md", "nom_admm", "nominal_prob", "Nominal problem"),
+            ("rob_pgd", "rob_md", "rob_admm", "robust_prob",  "Robust problem"),
         ]):
             ax = axes2[row, col]
-            ph = res[pgd_k]["history"];  mh = res[md_k]["history"]
+            ph = res[pgd_k]["history"]
+            mh = res[md_k]["history"]
+            ah = res[admm_k]["history"]
             ax.plot([h["iter"] for h in ph], [h["objective"] for h in ph],
-                    color="tomato",   lw=1.5, label="PGD")
+                    color="tomato",     lw=1.5, label="PGD")
             ax.plot([h["iter"] for h in mh], [h["objective"] for h in mh],
-                    color="seagreen", lw=1.5, label="MD (EG)")
+                    color="seagreen",   lw=1.5, label="MD (EG)")
+            ax.plot([h["iter"] for h in ah], [h["objective"] for h in ah],
+                    color="darkorange", lw=1.5, label="ADMM")
             eq_obj = res[prob_k].objective_from_delta(equal_delta)
             ax.axhline(eq_obj, color="steelblue", ls="--", lw=1.0, label="Equal schedule")
             ax.set_title(f"{slabel} — {title}", fontsize=9)
@@ -910,36 +1151,37 @@ if __name__ == "__main__":
         for col, (theta_idx, theta_lbl) in enumerate([(0, "at theta_hat"), (1, "at theta*")]):
             ax = axes3[row, col]
             vals = [res["analytic"][k][theta_idx] for k in sched_keys]
-            ax.bar(x5, vals, color=bar_clrs5, alpha=0.85)
+            ax.bar(x7, vals, color=bar_clrs7, alpha=0.85)
             eq_val = vals[0]
-            for xi in range(1, 5):
+            for xi in range(1, 7):
                 impr = 100 * (eq_val - vals[xi]) / eq_val
                 ax.text(xi, vals[xi] * 1.01, f"{impr:+.1f}%", ha="center", fontsize=7)
             ax.set_title(f"{slabel} — {theta_lbl}", fontsize=9)
-            ax.set_xticks(x5); ax.set_xticklabels(sched_disp, fontsize=8)
+            ax.set_xticks(x7); ax.set_xticklabels(sched_disp, fontsize=8)
             ax.set_ylabel("Objective (s)")
     plt.tight_layout()
     plt.savefig("figures/analytic_objective_robust.png", dpi=150, bbox_inches="tight")
     print("Saved figures/analytic_objective_robust.png")
 
     # ── Plot 4: MC runtime 3×2 ─────────────────────────────────────────────
-    fig4, axes4 = plt.subplots(3, 2, figsize=(14, 12))
-    fig4.suptitle(f"Monte Carlo mean runtime ({N_MC} trials)", fontsize=13)
-    for row, (res, slabel) in enumerate(zip(all_results, short_labels)):
-        for col, (mc_idx, lam_lbl) in enumerate([(0, "nominal lambda"), (1, "worst-case lambda")]):
-            ax = axes4[row, col]
-            vals = [res["mc"][k][mc_idx]["mean_runtime"]  for k in sched_keys]
-            errs = [res["mc"][k][mc_idx]["stderr_runtime"] for k in sched_keys]
-            ax.bar(x5, vals, yerr=errs, color=bar_clrs5, alpha=0.85, capsize=4)
-            eq_val = vals[0]
-            for xi in range(1, 5):
-                impr = 100 * (eq_val - vals[xi]) / eq_val
-                ax.text(xi, (vals[xi] + errs[xi]) * 1.02, f"{impr:+.1f}%", ha="center", fontsize=7)
-            ax.set_title(f"{slabel} — {lam_lbl}", fontsize=9)
-            ax.set_xticks(x5); ax.set_xticklabels(sched_disp, fontsize=8)
-            ax.set_ylabel("Mean runtime (s)")
-    plt.tight_layout()
-    plt.savefig("figures/mc_runtime_robust.png", dpi=150, bbox_inches="tight")
-    print("Saved figures/mc_runtime_robust.png")
+    if RUN_MC:
+        fig4, axes4 = plt.subplots(3, 2, figsize=(14, 12))
+        fig4.suptitle(f"Monte Carlo mean runtime ({N_MC} trials)", fontsize=13)
+        for row, (res, slabel) in enumerate(zip(all_results, short_labels)):
+            for col, (mc_idx, lam_lbl) in enumerate([(0, "nominal lambda"), (1, "worst-case lambda")]):
+                ax = axes4[row, col]
+                vals = [res["mc"][k][mc_idx]["mean_runtime"]  for k in sched_keys]
+                errs = [res["mc"][k][mc_idx]["stderr_runtime"] for k in sched_keys]
+                ax.bar(x7, vals, yerr=errs, color=bar_clrs7, alpha=0.85, capsize=4)
+                eq_val = vals[0]
+                for xi in range(1, 7):
+                    impr = 100 * (eq_val - vals[xi]) / eq_val
+                    ax.text(xi, (vals[xi] + errs[xi]) * 1.02, f"{impr:+.1f}%", ha="center", fontsize=7)
+                ax.set_title(f"{slabel} — {lam_lbl}", fontsize=9)
+                ax.set_xticks(x7); ax.set_xticklabels(sched_disp, fontsize=8)
+                ax.set_ylabel("Mean runtime (s)")
+        plt.tight_layout()
+        plt.savefig("figures/mc_runtime_robust.png", dpi=150, bbox_inches="tight")
+        print("Saved figures/mc_runtime_robust.png")
 
-    plt.show()
+    # plt.show()

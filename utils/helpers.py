@@ -15,14 +15,20 @@ SECONDS_PER_HOUR = 3600.0
 def integrate_lambda(lambda_fn: Callable[[float], float], a: float, b: float, num_steps: int = 256) -> float:
     """
     Numerically integrate lambda_fn over [a, b] using trapezoidal rule.
+    lambda_fn may accept numpy arrays (fast path) or only scalars (fallback).
     """
     if b < a:
         raise ValueError("b must be >= a")
     if a == b:
         return 0.0
     xs = np.linspace(a, b, num_steps + 1)
-    ys = np.array([lambda_fn(x) for x in xs], dtype=float)
-    return np.trapezoid(ys, xs)
+    try:
+        ys = np.asarray(lambda_fn(xs), dtype=float)
+        if ys.shape != xs.shape:
+            raise ValueError("shape mismatch")
+    except (TypeError, ValueError, AttributeError):
+        ys = np.array([lambda_fn(x) for x in xs], dtype=float)
+    return float(np.trapezoid(ys, xs))
 
 
 def cumulative_hazard_segments(lambda_fn: Callable[[float], float], T_knots: np.ndarray, num_steps: int = 256) -> np.ndarray:
@@ -40,17 +46,22 @@ def interval_work_integral(lambda_fn: Callable[[float], float], a: float, b: flo
     """
     Compute I_k = ∫_a^b exp(-Λ_k(u)) du  where  Λ_k(u) = ∫_a^u lambda(v) dv.
 
-    Uses the trapezoidal rule to build the cumulative hazard incrementally,
-    then integrates exp(-Λ_k(u)) with the trapezoidal rule.
+    Uses the trapezoidal rule to build the cumulative hazard, then integrates
+    exp(-Λ_k(u)) with the trapezoidal rule.  lambda_fn may be array-valued.
     """
     if a == b:
         return 0.0
     xs = np.linspace(a, b, num_steps + 1)
-    lam_vals = np.array([lambda_fn(x) for x in xs], dtype=float)
+    try:
+        lam_vals = np.asarray(lambda_fn(xs), dtype=float)
+        if lam_vals.shape != xs.shape:
+            raise ValueError("shape mismatch")
+    except (TypeError, ValueError, AttributeError):
+        lam_vals = np.array([lambda_fn(x) for x in xs], dtype=float)
     dx = (b - a) / num_steps
-    cum_hazard = np.zeros(num_steps + 1, dtype=float)
-    for j in range(1, num_steps + 1):
-        cum_hazard[j] = cum_hazard[j - 1] + 0.5 * (lam_vals[j - 1] + lam_vals[j]) * dx
+    # Vectorised cumulative trapezoid (replaces Python loop)
+    increments = 0.5 * (lam_vals[:-1] + lam_vals[1:]) * dx
+    cum_hazard = np.concatenate([[0.0], np.cumsum(increments)])
     integrand = np.exp(-cum_hazard)
     return float(np.trapezoid(integrand, xs))
 
