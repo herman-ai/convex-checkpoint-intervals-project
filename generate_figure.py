@@ -133,7 +133,7 @@ def plot_hazard_with_checkpoints(
 
     Returns the multistart result dict (pgd_runs, md_runs, best_delta, best_obj, equal_obj).
     """
-    os.makedirs("figures", exist_ok=True)
+    os.makedirs("figures/final", exist_ok=True)
 
     total_time = 48.0 * SECONDS_PER_HOUR
     t_values = np.linspace(0.0, total_time, 1000)
@@ -296,12 +296,12 @@ def plot_convergence_combined(
     print(f"Saved {output_path}")
 
 
-def plot_K_sweep(c: float, output_path: str = "figures/K_sweep.png") -> dict[str, int]:
+def plot_K_sweep(c: float, output_path: str = "figures/final/K_sweep.png") -> dict[str, int]:
     """Plot optimal objective value vs. number of checkpoints K (no multistart).
 
     Returns a dict mapping hazard label to its optimal K.
     """
-    os.makedirs("figures", exist_ok=True)
+    os.makedirs("figures/final", exist_ok=True)
 
     K_values = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
     total_time = 48.0 * SECONDS_PER_HOUR
@@ -363,7 +363,7 @@ def plot_hazard_optimal_K(
     md_kwargs: dict | None = None,
 ) -> None:
     """Plot hazard rate with optimal checkpoint locations at the K that minimises total cost."""
-    os.makedirs("figures", exist_ok=True)
+    os.makedirs("figures/final", exist_ok=True)
     pgd_kwargs = pgd_kwargs or {}
     md_kwargs = md_kwargs or {}
 
@@ -431,9 +431,9 @@ def main() -> None:
     c = 60 * 20  # 20-minute checkpoint write cost (seconds)
 
     configs = [
-        ("Step",        lambda_fn_step,        "figures/step_hazard.png",        "figures/step_convergence.png"),
-        ("Polynomial",  lambda_fn_polynomial,  "figures/polynomial_hazard.png",  "figures/polynomial_convergence.png"),
-        ("Power-law",   lambda_fn_power_law,   "figures/powerlaw_hazard.png",    "figures/powerlaw_convergence.png"),
+        ("Step",        lambda_fn_step,        "figures/final/step_hazard.png",        "figures/final/step_convergence.png"),
+        ("Polynomial",  lambda_fn_polynomial,  "figures/final/polynomial_hazard.png",  "figures/final/polynomial_convergence.png"),
+        ("Power-law",   lambda_fn_power_law,   "figures/final/powerlaw_hazard.png",    "figures/final/powerlaw_convergence.png"),
     ]
 
     combined_entries = []
@@ -448,14 +448,14 @@ def main() -> None:
         )
         combined_entries.append((label, ms["pgd_runs"], ms["md_runs"], ms["equal_obj"], ms["best_obj"]))
 
-    plot_convergence_combined(combined_entries, "figures/convergence_combined.png")
+    plot_convergence_combined(combined_entries, "figures/final/convergence_combined.png")
 
-    optimal_K = plot_K_sweep(c=c, output_path="figures/K_sweep.png")
+    optimal_K = plot_K_sweep(c=c, output_path="figures/final/K_sweep.png")
 
     optimal_K_configs = [
-        ("Step",        lambda_fn_step,        "figures/step_optimal_K.png"),
-        ("Polynomial",  lambda_fn_polynomial,  "figures/polynomial_optimal_K.png"),
-        ("Power-law",   lambda_fn_power_law,   "figures/powerlaw_optimal_K.png"),
+        ("Step",        lambda_fn_step,        "figures/final/step_optimal_K.png"),
+        ("Polynomial",  lambda_fn_polynomial,  "figures/final/polynomial_optimal_K.png"),
+        ("Power-law",   lambda_fn_power_law,   "figures/final/powerlaw_optimal_K.png"),
     ]
     for label, lambda_fn, path in optimal_K_configs:
         plot_hazard_optimal_K(
