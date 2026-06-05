@@ -5,12 +5,16 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+import sys
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+sys.path.insert(0, str(Path(__file__).parent / "robust"))
 from utils.helpers import SECONDS_PER_HOUR, UsefulWorkHazardProblem
+sys.path.pop(0)
 
 
 def _load_optimizer_helpers() -> dict[str, Any]:
