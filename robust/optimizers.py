@@ -74,8 +74,6 @@ def optimize_pgd_internal_knots(
         update_norm = np.linalg.norm(T_new - T_internal)
         history.append({"iter": it, "objective": obj_new, "update_norm": update_norm})
         T_internal = T_new
-        if update_norm < 1e-6:
-            break
 
     T_full = problem.internal_knots_to_full(T_internal)
     delta  = problem.full_knots_to_delta(T_full)
@@ -144,8 +142,6 @@ def optimize_mirror_descent(
 
         history.append({"iter": it, "objective": best_obj, "update_norm": update_norm})
         delta_tilde = delta_tilde_new
-        if update_norm < 1e-6:
-            break
 
     delta = best_delta_tilde + problem.epsilon
     return {
@@ -191,6 +187,13 @@ def _interval_h_grad_and_hess(
         ut     = exp_L * I
         lam_a  = wp.lambda_fn(a)
         lam_b  = wp.lambda_fn(b)
+    elif hasattr(problem, "lambda_fn"):
+        L      = integrate_lambda(problem.lambda_fn, a, b, num_steps=num_steps)
+        exp_L  = np.exp(L)
+        I      = interval_work_integral(problem.lambda_fn, a, b, num_steps=num_steps)
+        ut     = exp_L * I
+        lam_a  = float(problem.lambda_fn(a))
+        lam_b  = float(problem.lambda_fn(b))
     else:
         raise NotImplementedError(
             f"_interval_h_grad_and_hess: unsupported type {type(problem)}"

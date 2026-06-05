@@ -237,8 +237,9 @@ class RobustPolynomialHazardProblem:
 
         lambda(t; theta) = sum_{j=0}^{n} theta_j * (t/T)^j,   theta in R^{n+1}
 
-    Uncertainty set: theta in [theta_hat - rho, theta_hat + rho], lambda >= 0.
-    Worst case: theta* = max(theta_hat + rho, 0)  (upper corner).
+    Uncertainty set: theta in [theta_hat - rho, theta_hat + rho].
+    Worst case: theta* = theta_hat + rho  (upper corner, no coefficient clipping).
+    Lambda is clipped to 0 pointwise to ensure a non-negative hazard rate.
 
     Delegates objective/gradient to UsefulWorkHazardProblem evaluated at theta*.
     """
@@ -261,7 +262,7 @@ class RobustPolynomialHazardProblem:
         self.rho = np.broadcast_to(_rho, self.theta_hat.shape).copy()
         self.q = np.asarray(q, dtype=float)
 
-        theta_star = np.maximum(self.theta_hat + self.rho, 0.0)
+        theta_star = self.theta_hat + self.rho
         self._worst_problem = UsefulWorkHazardProblem(
             total_useful_work=self.T,
             num_intervals=self.K,
@@ -279,7 +280,7 @@ class RobustPolynomialHazardProblem:
             t = np.asarray(t, dtype=float)
             scalar = t.ndim == 0
             t = np.atleast_1d(t)
-            result = (t[:, np.newaxis] / T) ** js @ theta
+            result = np.maximum((t[:, np.newaxis] / T) ** js @ theta, 0.0)
             return float(result[0]) if scalar else result
 
         return lambda_fn

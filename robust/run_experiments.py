@@ -134,7 +134,7 @@ def main() -> None:
     K      = 8
     T      = 48 * 3600.0
     epsilon = 0.5 * 3600.0
-    q = np.array([5*60, 5*60, 10*60, 10*60, 15*60, 15*60, 20*60, 20*60], dtype=float)
+    q = np.full(K, 10 * 60, dtype=float)
     N_MC = 100
 
     # ── 1. Step hazard (3-phase, ordering reversal) ───────────────────────────

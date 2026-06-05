@@ -28,7 +28,8 @@ def integrate_lambda(lambda_fn: Callable[[float], float], a: float, b: float, nu
             raise ValueError("shape mismatch")
     except (TypeError, ValueError, AttributeError):
         ys = np.array([lambda_fn(x) for x in xs], dtype=float)
-    return float(np.trapezoid(ys, xs))
+    dx = xs[1:] - xs[:-1]
+    return float(np.sum(dx * (ys[1:] + ys[:-1]) * 0.5))
 
 
 def cumulative_hazard_segments(lambda_fn: Callable[[float], float], T_knots: np.ndarray, num_steps: int = 256) -> np.ndarray:
@@ -63,7 +64,8 @@ def interval_work_integral(lambda_fn: Callable[[float], float], a: float, b: flo
     increments = 0.5 * (lam_vals[:-1] + lam_vals[1:]) * dx
     cum_hazard = np.concatenate([[0.0], np.cumsum(increments)])
     integrand = np.exp(-cum_hazard)
-    return float(np.trapezoid(integrand, xs))
+    dx2 = xs[1:] - xs[:-1]
+    return float(np.sum(dx2 * (integrand[1:] + integrand[:-1]) * 0.5))
 
 
 def interval_work_integrals(lambda_fn: Callable[[float], float], T_knots: np.ndarray, num_steps: int = 256) -> np.ndarray:
