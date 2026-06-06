@@ -77,8 +77,8 @@ def _get_lambda_fns(prob: Any):
     return nom_fn, worst_fn, best_fn
 
 
-def plot_robust_hazards(output_path: str = "figures/robust_hazards.png") -> None:
-    os.makedirs("figures", exist_ok=True)
+def plot_robust_hazards(output_path: str = "figures/robust/robust_hazards.png") -> None:
+    os.makedirs("figures/robust", exist_ok=True)
 
     configs = [
         ("Step",       "steelblue"),
@@ -373,7 +373,7 @@ def plot_hazard_with_bands_and_checkpoints(
     output_path: str,
     color: str = "steelblue",
 ) -> None:
-    os.makedirs("figures", exist_ok=True)
+    os.makedirs("figures/robust", exist_ok=True)
 
     nom_fn, worst_fn, best_fn = _get_lambda_fns(robust_prob)
     total_time   = robust_prob.total_useful_work
@@ -621,7 +621,7 @@ def plot_mc_comparison(entries: list[dict], output_path: str) -> None:
 
 
 def main() -> None:
-    os.makedirs("figures", exist_ok=True)
+    os.makedirs("figures/robust", exist_ok=True)
     plot_robust_hazards()
 
     pgd_kwargs  = {"max_iters": 2000, "step_size": 1e3,  "num_steps": 256}
@@ -644,7 +644,7 @@ def main() -> None:
             entry["label"],
             entry["robust_ms"], entry["robust_prob"],
             entry["equal_obj"], entry["best_obj"],
-            f"figures/{label_key}_hazard_robust.png",
+            f"figures/robust/{label_key}_hazard_robust.png",
             color=color,
         )
         plot_convergence_robust(
@@ -654,11 +654,11 @@ def main() -> None:
             entry["robust_ms"]["admm_runs"],
             entry["equal_obj"],
             entry["best_obj"],
-            f"figures/{label_key}_convergence_robust.png",
+            f"figures/robust/{label_key}_convergence_robust.png",
         )
         combined_entries.append(entry)
 
-    plot_convergence_combined_robust(combined_entries, "figures/convergence_combined_robust.png")
+    plot_convergence_combined_robust(combined_entries, "figures/robust/convergence_combined_robust.png")
 
     mc_entries = []
     for entry in combined_entries:
@@ -669,7 +669,7 @@ def main() -> None:
             pgd_kwargs=pgd_kwargs, md_kwargs=md_kwargs, admm_kwargs=admm_kwargs,
         )
         mc_entries.append(mc_entry)
-    plot_mc_comparison(mc_entries, "figures/mc_comparison.png")
+    plot_mc_comparison(mc_entries, "figures/robust/mc_comparison.png")
 
 
 if __name__ == "__main__":
