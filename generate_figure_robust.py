@@ -547,7 +547,7 @@ def plot_mc_comparison(entries: list[dict], output_path: str) -> None:
     Violin + box plots comparing nominal, robust, and equal schedules over sampled thetas.
 
     Each panel shows one hazard family. The three groups per panel are the three scheduling
-    policies; the distribution is the true expected rework cost evaluated over n_mc hazard
+    policies; the distribution is the true expected total cost evaluated over n_mc hazard
     parameters θ drawn uniformly from the uncertainty set.
     """
     n      = len(entries)
@@ -591,7 +591,7 @@ def plot_mc_comparison(entries: list[dict], output_path: str) -> None:
 
         # only label y-axis on the leftmost subplot
         if i == 0:
-            ax.set_ylabel("Expected rework cost (h)", fontsize=10)
+            ax.set_ylabel("Expected total cost (h)", fontsize=10)
 
         # tight y-limits: zoom in to where the data actually is
         all_vals = np.concatenate(datasets)
@@ -606,7 +606,7 @@ def plot_mc_comparison(entries: list[dict], output_path: str) -> None:
     fig.suptitle("Out-of-Sample Performance", fontsize=13, y=1.01)
     fig.text(
         0.5, 0.97,
-        f"Distribution of expected rework cost over {n_mc} hazard parameters θ "
+        f"Distribution of expected total cost over {n_mc} hazard parameters θ "
         f"drawn uniformly from the uncertainty set.\n"
         f"Nominal: schedule optimized at θ̂.  "
         f"Robust: schedule optimized for worst-case θ.  "
